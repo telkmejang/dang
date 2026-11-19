@@ -37,10 +37,14 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add seen_items.json
-          if git diff --staged --quiet; then
-            echo "변경된 seen_items.json 없음"
+          if [ -f seen_items.json ]; then
+            git add seen_items.json
+            if git diff --staged --quiet; then
+              echo "변경된 seen_items.json 없음"
+            else
+              git commit -m "chore: update seen_items.json"
+              git push
+            fi
           else
-            git commit -m "chore: update seen_items.json"
-            git push
+            echo "seen_items.json 파일 없음 (건너뜀)"
           fi
