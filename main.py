@@ -4,6 +4,7 @@ import requests
 from analyzer import analyze_deal
 from config import TARGET_URLS, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 from scraper import fetch_listings
+from analyzer import evaluate_deal as analyze_deal
 
 SEEN_FILE = "seen_items.json"
 
