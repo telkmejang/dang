@@ -72,3 +72,4 @@ if __name__ == "__main__":
     }
     ok, msg = evaluate_deal(sample_item)
     print(f"결과: {ok} | 사유: {msg}")
+    analyze_deal = evaluate_deal
