@@ -1,94 +1,145 @@
-import json
 import os
+import re
+import json
+import time
+import urllib.parse
 import requests
+from bs4 import BeautifulSoup
 from analyzer import analyze_deal
-from config import TARGET_URLS, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
-from scraper import fetch_listings
-from analyzer import evaluate_deal as analyze_deal
 
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 SEEN_FILE = "seen_items.json"
+
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+        "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+    )
+}
+
+TARGET_BRANDS = [
+    # 1. 당근 헐값/빈티지 발굴 최다 (10)
+    "아크테릭스", "파타고니아", "몽벨", "노스페이스", "버버리",
+    "폴로", "바버", "리바이스", "칼하트", "오클리",
+    # 2. 급처 매물 다수 · 고마진 아카이브/컨템 (10)
+    "스톤아일랜드", "CP컴퍼니", "메종마르지엘라", "아워레가시", "아크네스튜디오",
+    "프라다", "비비안웨스트우드", "꼼데가르송", "살로몬", "미하라야스히로",
+    # 3. 고회전 스트릿 · 일본 도메스틱 (10)
+    "스투시", "슈프림", "팔라스", "니들스", "캐피탈",
+    "휴먼메이드", "베이프", "디스이즈네버댓", "언더커버", "요지야마모토",
+]
 
 
 def load_seen() -> set:
-    if os.path.exists(SEEN_FILE):
-        try:
-            with open(SEEN_FILE, "r", encoding="utf-8") as f:
-                return set(json.load(f))
-        except Exception:
-            return set()
-    return set()
+    if not os.path.exists(SEEN_FILE):
+        return set()
+    try:
+        with open(SEEN_FILE, "r", encoding="utf-8") as f:
+            return set(json.load(f))
+    except Exception:
+        return set()
 
 
-def save_seen(seen_ids: set):
-    recent_list = list(seen_ids)[-2000:]
+def save_seen(seen_set: set):
+    recent_list = list(seen_set)[-5000:]
     with open(SEEN_FILE, "w", encoding="utf-8") as f:
         json.dump(recent_list, f, ensure_ascii=False, indent=2)
 
 
+def fetch_karrot(brand: str) -> list[dict]:
+    encoded = urllib.parse.quote(brand)
+    url = f"https://www.daangn.com/kr/buy-sell/?search={encoded}"
+    items = []
+
+    try:
+        res = requests.get(url, headers=HEADERS, timeout=10)
+        res.raise_for_status()
+        soup = BeautifulSoup(res.text, "html.parser")
+
+        for a_tag in soup.select("a[href*='/kr/buy-sell/']"):
+            href = a_tag.get("href", "")
+            match = re.search(r"/kr/buy-sell/([^/?#]+)", href)
+            if not match:
+                continue
+
+            slug = match.group(1)
+            text_lines = [t.strip() for t in a_tag.stripped_strings if t.strip()]
+            if len(text_lines) < 2:
+                continue
+
+            title = text_lines[0]
+            price = next((t for t in text_lines if "원" in t or "나눔" in t), "가격미상")
+            full_url = f"https://www.daangn.com{href}" if href.startswith("/") else href
+
+            items.append({
+                "unique_id": f"karrot:{slug}",
+                "brand": brand,
+                "title": title,
+                "price": price,
+                "description": " / ".join(text_lines[1:4]),
+                "url": full_url,
+            })
+    except Exception as e:
+        print(f"[당근 수집 오류 - {brand}] {e}")
+
+    return items[:15]
+
+
 def send_telegram(item: dict, reason: str):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print(f"🔔 [알림 테스트] {item['title']} ({item['info']}) - {reason}")
+        print("[경고] 텔레그램 토큰 또는 채팅 ID가 설정되지 않았습니다.")
         return
 
-    msg = (
-        f"🔥 <b>당근 꿀매 포착!</b>\n\n"
-        f"📦 <b>{item['title']}</b>\n"
-        f"💰 {item['info']}\n"
-        f"🤖 <b>AI 분석:</b> {reason}\n\n"
-        f"🔗 <a href='{item['link']}'>매물 바로가기</a>"
+    text = (
+        f"🥕 <b>[당근 사입 꿀매 포착]</b>\n\n"
+        f"🏷 <b>브랜드:</b> {item['brand']}\n"
+        f"📦 <b>상품명:</b> {item['title']}\n"
+        f"💰 <b>가격:</b> {item['price']}\n"
+        f"💡 <b>판정:</b> {reason}\n\n"
+        f"🔗 <a href=\"{item['url']}\">당근 매물 바로가기</a>"
     )
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+
+    api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     try:
-        resp = requests.post(
-            url,
+        requests.post(
+            api_url,
             json={
                 "chat_id": TELEGRAM_CHAT_ID,
-                "text": msg,
+                "text": text,
                 "parse_mode": "HTML",
                 "disable_web_page_preview": False,
             },
             timeout=10,
         )
-        resp.raise_for_status()
     except Exception as e:
-        print(f"[텔레그램 전송 에러] {e}")
+        print(f"[텔레그램 전송 오류] {e}")
 
 
-def run_once():
-    if not TARGET_URLS:
-        print("⚠️ TARGET_URLS가 설정되지 않았습니다. GitHub Secrets를 확인하세요.")
-        return
+def main():
+    seen = load_seen()
+    new_alerts = 0
+    print(f"당근마켓 탐색 시작 | 대상 브랜드: {len(TARGET_BRANDS)}개")
 
-    seen_ids = load_seen()
-    initial_count = len(seen_ids)
-    print(f"🚀 당근 헌터 1회 스캔 시작 (감시 URL: {len(TARGET_URLS)}개)")
-
-    for url in TARGET_URLS:
-        listings = fetch_listings(url)
-        new_count = 0
-
-        for item in listings:
-            if item["id"] in seen_ids:
+    for brand in TARGET_BRANDS:
+        items = fetch_karrot(brand)
+        for item in items:
+            uid = item["unique_id"]
+            if uid in seen:
                 continue
 
-            seen_ids.add(item["id"])
-            new_count += 1
-            print(f"🆕 새 매물 발견: {item['title']} | {item['info']}")
+            seen.add(uid)
+            is_deal, reason = analyze_deal(item)
+            if is_deal:
+                send_telegram(item, reason)
+                new_alerts += 1
+                print(f"[알림 발송] {item['title']} ({item['price']})")
 
-            analysis = analyze_deal(item)
-            if analysis["is_deal"]:
-                print(f"✅ 꿀매 판정! 알림 전송 -> {item['title']}")
-                send_telegram(item, analysis["reason"])
-            else:
-                print(f"⏭️ 패스: {analysis['reason']}")
+        time.sleep(0.8)
 
-        if new_count == 0:
-            print(f"💤 새 매물 없음 ({url})")
-
-    if len(seen_ids) != initial_count:
-        save_seen(seen_ids)
-        print("💾 seen_items.json 업데이트 완료")
+    save_seen(seen)
+    print(f"탐색 완료. 신규 사입 알림: {new_alerts}건")
 
 
 if __name__ == "__main__":
-    run_once()
+    main()
